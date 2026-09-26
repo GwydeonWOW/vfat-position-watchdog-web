@@ -1,6 +1,7 @@
-import importlib.util, sys, logging
+import importlib.util, os, sys, logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-spec = importlib.util.spec_from_file_location("vw", "/home/ubuntu/CryptoRobotFlash/vfat_watchdog.py")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+spec = importlib.util.spec_from_file_location("vw", os.path.join(ROOT, "vfat_watchdog.py"))
 vw = importlib.util.module_from_spec(spec)
 sys.modules["vw"] = vw  # necesario para dataclasses en Python 3.12+
 spec.loader.exec_module(vw)

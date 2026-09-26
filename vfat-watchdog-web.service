@@ -1,0 +1,17 @@
+[Unit]
+Description=vfat-position-watchdog · interfaz web (web_server.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/CryptoRobotFlash
+ExecStart=/usr/bin/env python3 /home/ubuntu/CryptoRobotFlash/web_server.py --env /home/ubuntu/CryptoRobotFlash/.env
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

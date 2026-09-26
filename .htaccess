@@ -1,0 +1,7 @@
+# Defense-in-depth: si este directorio cae bajo el DocumentRoot de Apache
+# (p. ej. con Laragon), niega el acceso a ficheros sensibles y al listado.
+# La interfaz web NO se sirve desde aquí: la sirve web_server.py en su puerto.
+<FilesMatch "^\.env(\..*)?$|\.env$|.*\.(log|pyc)$|__pycache__">
+  Require all denied
+</FilesMatch>
+Options -Indexes

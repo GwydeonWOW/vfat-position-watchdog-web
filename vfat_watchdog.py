@@ -26,6 +26,7 @@ import argparse
 import html
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -676,11 +677,87 @@ class State:
 
 
 # --------------------------------------------------------------------------
+# Resultado de una comprobación (serializable, para la interfaz web)
+# --------------------------------------------------------------------------
+
+def _finite(value: Any) -> Optional[float]:
+    """float finito para JSON (None si es NaN/infinito o no convertible)."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def position_summary(pos: Position) -> Dict[str, Any]:
+    """Representación serializable (JSON) de una posición, para la interfaz web."""
+    side, distance = pos.side()
+
+    def _call(fn) -> Optional[float]:
+        try:
+            return _finite(fn())
+        except (OverflowError, ValueError, ZeroDivisionError):
+            return None
+
+    return {
+        "key": pos.key,
+        "pair": pos.label,
+        "protocol": pos.protocol,
+        "chain": _chain_name(pos.chain_id),
+        "chain_id": pos.chain_id,
+        "id": pos.pos_id,
+        "wallet": pos.wallet,
+        "kind": pos.kind,
+        "in_range": pos.in_range,
+        "side": side,
+        "distance_pct": _finite(distance),
+        "price_now": _call(pos.price_now),
+        "price_low": _call(pos.price_low),
+        "price_up": _call(pos.price_up),
+        "value_usd": _finite(pos.value_usd),
+        "rewards_usd": _finite(pos.rewards_usd),
+        "fees_usd": _finite(pos.fees_usd),
+        "tick": _finite(pos.tick),
+        "tick_low": _finite(pos.tick_low),
+        "tick_up": _finite(pos.tick_up),
+    }
+
+
+@dataclass
+class CheckResult:
+    """Resumen de una comprobación (para la interfaz web y logs estructurados)."""
+    ts: float
+    ok: bool
+    duration: float = 0.0
+    in_range: List[Position] = field(default_factory=list)
+    out_range: List[Position] = field(default_factory=list)
+    uncheckable: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ts": self.ts,
+            "ok": self.ok,
+            "duration": round(_finite(self.duration) or 0.0, 2),
+            "total": len(self.in_range) + len(self.out_range),
+            "in_range": len(self.in_range),
+            "out_range": len(self.out_range),
+            # primero las que están fuera de rango: son las interesantes
+            "positions": ([position_summary(p) for p in self.out_range] +
+                          [position_summary(p) for p in self.in_range]),
+            "uncheckable": self.uncheckable,
+            "error": self.error,
+        }
+
+
+# --------------------------------------------------------------------------
 # Ciclo de comprobación
 # --------------------------------------------------------------------------
 
 def run_once(cfg: Config, mcp: McpClient, tg: Optional[Telegram], state: State,
-             dry_run: bool) -> None:
+             dry_run: bool) -> CheckResult:
     started = time.monotonic()
     positions: List[Position] = []
     uncheckable: List[str] = []
@@ -740,6 +817,15 @@ def run_once(cfg: Config, mcp: McpClient, tg: Optional[Telegram], state: State,
             f"Posiciones vigiladas: {len(positions)} · en rango: {len(in_range)} · fuera: {len(out_range)}"
         ), dry_run)
         state.last_heartbeat = time.time()
+
+    return CheckResult(
+        ts=time.time(),
+        ok=True,
+        duration=elapsed,
+        in_range=in_range,
+        out_range=out_range,
+        uncheckable=uncheckable,
+    )
 
 
 # --------------------------------------------------------------------------

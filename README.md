@@ -92,6 +92,91 @@ curso). En segundo plano: `nohup ./vfat_watchdog.py >/dev/null 2>&1 &`.
 | `LOG_FILE` | *(stdout)* | Fichero adicional de log. |
 | `MCP_URL` | `https://mcp.vfat.io/mcp` | Endpoint del MCP (no requiere API key). |
 
+## Modo web: interfaz estilo terminal
+
+Además del demonio CLI, `web_server.py` sirve una **interfaz web con estética
+de terminal CRT** (verde fósforo, scanlines, consola con comandos) y una API
+JSON. Usa el mismo núcleo que el CLI —mismos avisos de Telegram, misma
+matemática de rangos— y **solo librería estándar** (sin Flask/Django/Node).
+
+```
+navegador ──▶ web_server.py ──▶ vfat_watchdog.run_once() ──▶ MCP vfat
+   ▲                │                     │
+   └── /api/status  │  hilo de vigilancia └──▶ Telegram (avisos)
+       /api/logs    │
+       /api/action ─┘  start/stop/check/set …
+```
+
+### Arranque rápido
+
+```bash
+python web_server.py                 # → http://127.0.0.1:8000
+python web_server.py --port 8080     # otro puerto
+python web_server.py --password xyz  # exige contraseña en la web
+python web_server.py --no-autostart  # sirve la web sin vigilar aún
+```
+
+Variables web en el `.env` (todas opcionales): `WEB_HOST` (por defecto
+`127.0.0.1`), `WEB_PORT` (`8000`), `WEB_PASSWORD` (vacía = sin contraseña),
+`WEB_AUTOSTART` (`true`, arranca la vigilancia al levantar el servidor).
+
+### Comandos de la consola web
+
+| Comando | Acción |
+|---|---|
+| `help` | lista de comandos |
+| `status` | demonio, intervalo, wallets, última comprobación |
+| `pos` | tabla de posiciones (en rango / fuera, precio, distancia, valor) |
+| `check` | fuerza una comprobación inmediata |
+| `start` / `stop` | arranca / para el bucle de vigilancia |
+| `config` | muestra la configuración actual (token enmascarado) |
+| `set <clave> <valor>` | cambia ajustes en caliente (`wallets`, `interval`, `chain_ids`, `alert_only_changes`, `alert_on_recovery`, `heartbeat_hours`, `telegram_token`, `telegram_chat_id`; `-` para vaciar) |
+| `test-telegram` | envía un mensaje de prueba |
+| `theme [perfil]` | perfil de color de la consola: `verde`, `ambar`, `cian`, `magenta`, `blanco` (sin argumento, los lista; también seleccionable con los cuadros de color de la cabecera; se recuerda en el navegador) |
+| `clear` / `logout` | limpia la consola / cierra sesión |
+
+### Alojarlo detrás de un servidor web
+
+El Python escucha en su propio puerto; pon un proxy inverso delante si
+quieres dominio y HTTPS. **No sirvas este directorio como estático**: el `.env`
+lleva el token del bot (hay un `.htaccess` de defensa, pero mejor no exponerlo).
+
+**Apache** (p. ej. Laragon/`httpd-vhosts.conf`, requiere `mod_proxy`):
+
+```apache
+<VirtualHost *:80>
+    ServerName watchdog.test
+    ProxyPreserveHost On
+    ProxyPass / http://127.0.0.1:8000/
+    ProxyPassReverse / http://127.0.0.1:8000/
+</VirtualHost>
+```
+
+**nginx**:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name watchdog.midominio.com;
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+Y en el `.env` deja `WEB_HOST=127.0.0.1` (solo el proxy lo ve) y define
+`WEB_PASSWORD`. En Linux, `vfat-watchdog-web.service` es la unidad systemd
+equivalente a la del CLI.
+
+### Seguridad
+
+- `WEB_PASSWORD` activa login con cookie de sesión (HttpOnly, SameSite=Strict,
+  7 días) y limita intentos fallidos por IP. Sin contraseña, el servidor solo
+  debe escuchar en `127.0.0.1`.
+- Para exponerlo a Internet: proxy inverso con TLS + `WEB_PASSWORD`.
+- El token de Telegram nunca viaja al navegador (la API lo enmascara).
+
 ## Ejecutar como servicio (systemd)
 
 ```bash
@@ -111,10 +196,13 @@ journalctl -u vfat-watchdog -f          # ver logs
 
 `tests/test_watchdog.py` verifica con datos sintéticos el cálculo de rango, el
 precio humano (`1.0001^tick · 10^(dec0−dec1)`), el filtrado por wallet/chain,
-los avisos de salida y de retorno a rango, y el modo `ALERT_ONLY_CHANGES`:
+los avisos de salida y de retorno a rango, y el modo `ALERT_ONLY_CHANGES`.
+`tests/test_web.py` prueba la API del modo web (estado, logs, acciones,
+configuración en caliente y login) con un MCP falso:
 
 ```bash
 python3 tests/test_watchdog.py
+python3 tests/test_web.py
 ```
 
 ## Notas
