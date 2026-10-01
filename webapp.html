@@ -191,7 +191,7 @@
   <footer>
     <span class="prompt" id="prompt">watchdog@vfat:~$</span>
     <input id="cmd" autocomplete="off" spellcheck="false" autocapitalize="off" aria-label="línea de comandos">
-    <span class="hint">help · status · pos · check · start · stop · config · set · theme · clear</span>
+    <span class="hint">help · status · pos · check · start · stop · config · set · theme · tts · clear</span>
   </footer>
 
 </div>
@@ -287,6 +287,115 @@ try{ savedTheme = localStorage.getItem("vfat-theme") || "verde"; }catch(e){}
 applyTheme(savedTheme, false);
 buildSwatches();
 
+/* ---------------- TTS (avisos de voz) ---------------- */
+
+const TTS = {
+  supported: "speechSynthesis" in window,
+  on: true,          // avisos de voz activados
+  voice: "",         // nombre de la voz ("" = predeterminada del navegador)
+  rate: 1,           // velocidad 0.5–2
+  volume: 1,         // volumen 0–1
+  beep: true,        // pitido de alarma antes de hablar
+  voices: [],        // voces del navegador (carga asíncrona)
+  unlocked: false,   // el navegador requiere interacción antes de sonar
+  warned: false,
+  audio: null,
+};
+
+function ttsLoad(){
+  try{
+    const raw = localStorage.getItem("vfat-tts");
+    if (raw){
+      const saved = JSON.parse(raw);
+      for (const k of ["on","voice","rate","volume","beep"]){
+        if (saved[k] !== undefined) TTS[k] = saved[k];
+      }
+    }
+  }catch(e){}
+  if (TTS.supported){
+    const load = () => { TTS.voices = window.speechSynthesis.getVoices(); };
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
+  }
+}
+function ttsSave(){
+  try{
+    localStorage.setItem("vfat-tts", JSON.stringify(
+      {on:TTS.on, voice:TTS.voice, rate:TTS.rate, volume:TTS.volume, beep:TTS.beep}));
+  }catch(e){}
+}
+function ttsUnlock(){
+  if (TTS.unlocked || !TTS.supported) return;
+  TTS.unlocked = true;
+  try{ window.speechSynthesis.speak(new SpeechSynthesisUtterance("")); }catch(e){}
+}
+function ttsBeep(){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!TTS.audio) TTS.audio = new AC();
+    if (TTS.audio.state === "suspended") TTS.audio.resume();
+    const ctx = TTS.audio, t = ctx.currentTime, vol = Math.max(0.02, 0.12 * TTS.volume);
+    for (let i = 0; i < 2; i++){
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = "square";
+      osc.frequency.value = i ? 740 : 990;
+      const t0 = t + i * 0.18;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(vol, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14);
+      osc.connect(g).connect(ctx.destination);
+      osc.start(t0); osc.stop(t0 + 0.16);
+    }
+  }catch(e){}
+}
+function ttsSpeak(text){
+  if (!TTS.supported || !TTS.on) return false;
+  if (!TTS.unlocked && !TTS.warned){
+    TTS.warned = true;
+    print("⚠ el navegador bloquea el audio hasta que interactúes con la página (pulsa una tecla)", "warn");
+  }
+  try{
+    if (TTS.beep) ttsBeep();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = TTS.voices.find((x) => x.name === TTS.voice);
+    if (v){ u.voice = v; u.lang = v.lang; }
+    u.rate = TTS.rate;
+    u.volume = TTS.volume;
+    window.speechSynthesis.cancel();  // el aviso nuevo pisa el pendiente
+    window.speechSynthesis.speak(u);
+    return true;
+  }catch(e){ return false; }
+}
+function ttsPair(p){
+  return String(p.pair || "").replace("/", " contra ").replace(/[-_]/g, " ");
+}
+/* habla al detectar transiciones: entra/sale de rango (no repite mientras dura) */
+function ttsWatch(st){
+  const r = st && st.last_result;
+  if (!r || !TTS.supported) return;
+  const seen = state.ttsSeen, fresh = {};
+  for (const p of r.positions){
+    const key = p.chain + ":" + p.wallet + ":" + p.id;
+    const was = seen[key];
+    fresh[key] = !!p.in_range;
+    const wentOut = was === undefined ? !p.in_range : (was && !p.in_range);
+    if (wentOut){
+      const dist = (p.distance_pct !== null && p.distance_pct !== undefined)
+        ? ", un " + Number(p.distance_pct).toFixed(1).replace(".", ",") + " por ciento " + (p.side || "")
+        : "";
+      ttsSpeak("Atención. Posición " + ttsPair(p) + " en " + p.chain + " fuera de rango" + dist);
+    } else if (was === false && p.in_range){
+      ttsSpeak("Posición " + ttsPair(p) + " de vuelta en rango");
+    }
+  }
+  state.ttsSeen = fresh;  // olvida posiciones que ya no existen
+}
+
+ttsLoad();
+document.addEventListener("keydown", ttsUnlock);
+document.addEventListener("pointerdown", ttsUnlock);
+
 /* ---------------- API ---------------- */
 
 let loginMode = false;
@@ -340,7 +449,7 @@ async function tryLogin(password){
 
 /* ---------------- estado y render ---------------- */
 
-const state = { status:null, lastLogId:0, clockOffset:0 };
+const state = { status:null, lastLogId:0, clockOffset:0, ttsSeen:{} };
 
 function renderPills(st){
   const daemon = $("pill-daemon");
@@ -442,6 +551,7 @@ async function pollStatus(){
     state.clockOffset = st.now * 1000 - Date.now();
     renderPills(st);
     renderTable(st);
+    ttsWatch(st);
   }catch(e){ /* 401 ya gestionado; errores de red: silencio (siguiente ciclo) */ }
 }
 async function pollLogs(){
@@ -472,6 +582,10 @@ const HELP = [
   "                       alert_on_recovery · heartbeat_hours · telegram_token ·",
   "                       telegram_chat_id   ('-' limpia chain_ids/telegram)",
   "  test-telegram        enviar un mensaje de prueba a Telegram",
+  "  test-tts [texto]     probar la voz de los avisos por sonido",
+  "  tts [opción]         voz y sonido al salir una posición de rango:",
+  "                       on · off · voice <n|nombre> · rate <0.5-2> ·",
+  "                       volume <0-1> · beep on/off   ('tts' a secas = estado)",
   "  theme [perfil]       ver o cambiar el perfil de color:",
   "                       verde · ambar · cian · magenta · blanco",
   "  logout               cerrar la sesión (si hay contraseña)",
@@ -531,6 +645,82 @@ const SET_KEYS = new Set(["wallets","interval","chain_ids","alert_only_changes",
   "alert_on_recovery","notify_start","notify_errors","heartbeat_hours",
   "telegram_token","telegram_chat_id"]);
 
+function cmdTts(args){
+  const sub = (args[0] || "").toLowerCase();
+  if (!sub){
+    const v = TTS.voices.find((x) => x.name === TTS.voice);
+    const lines = [
+      "soporte       " + (TTS.supported ? "disponible en este navegador ✔" : "NO soportado por este navegador"),
+      "estado        " + (TTS.on ? "activado ✔" : "desactivado  ('tts on' para activar)"),
+      "voz           " + (v ? v.name + " (" + v.lang + ")"
+                            : (TTS.voice ? TTS.voice + " (no encontrada aquí; valdrá la predeterminada)"
+                                         : "predeterminada del navegador")),
+      "velocidad     " + TTS.rate + "    (tts rate 0.5-2)",
+      "volumen       " + TTS.volume + "    (tts volume 0-1)",
+      "pitido        " + (TTS.beep ? "on" : "off") + "    (tts beep on/off)",
+      "voces         'tts voice' para listar y elegir",
+    ];
+    print(esc(lines.join("\n")), "");
+    return;
+  }
+  if (sub === "on" || sub === "off"){
+    TTS.on = sub === "on";
+    ttsSave();
+    print("avisos de voz " + (TTS.on ? "activados" : "desactivados"), "ok");
+    if (TTS.on) ttsSpeak("Avisos de voz activados.");
+    return;
+  }
+  if (sub === "beep"){
+    const b = (args[1] || "").toLowerCase();
+    if (b !== "on" && b !== "off"){ print("uso: tts beep on|off", "warn"); return; }
+    TTS.beep = b === "on";
+    ttsSave();
+    print("pitido previo al aviso: " + b, "ok");
+    if (TTS.beep) ttsBeep();
+    return;
+  }
+  if (sub === "voice"){
+    const rest = args.slice(1).join(" ").trim();
+    if (!rest){
+      if (!TTS.voices.length){
+        print("el navegador aún no ha cargado la lista de voces; espera un momento y reintenta", "warn");
+        return;
+      }
+      const max = 40;
+      const lines = TTS.voices.slice(0, max).map((v, i) =>
+        "  [" + i + "] " + (v.name === TTS.voice ? "● " : "  ") + v.name + " (" + v.lang + ")");
+      print("voces disponibles (" + TTS.voices.length + "):\n" + lines.join("\n") +
+        (TTS.voices.length > max ? "\n  … y " + (TTS.voices.length - max) + " más (elige por nombre)" : "") +
+        "\nuso: tts voice <número|nombre>", "");
+      return;
+    }
+    const q = rest.toLowerCase();
+    let v = /^\d+$/.test(q) ? (TTS.voices[parseInt(q, 10)] || null) : null;
+    if (!v) v = TTS.voices.find((x) => x.name.toLowerCase().includes(q)) || null;
+    if (!v){ print("voz no encontrada: " + esc(rest) + "  (usa 'tts voice' para listar)", "err"); return; }
+    TTS.voice = v.name;
+    ttsSave();
+    print("voz → " + v.name + " (" + v.lang + ")", "ok");
+    ttsSpeak("Voz seleccionada. Watchdog listo.");
+    return;
+  }
+  if (sub === "rate" || sub === "volume"){
+    const x = parseFloat(String(args[1] || "").replace(",", "."));
+    if (!isFinite(x)){ print("uso: tts " + sub + " <número>", "warn"); return; }
+    if (sub === "rate"){
+      TTS.rate = Math.min(2, Math.max(0.5, x));
+      print("velocidad → " + TTS.rate, "ok");
+    } else {
+      TTS.volume = Math.min(1, Math.max(0, x > 1 ? x / 100 : x));
+      print("volumen → " + TTS.volume, "ok");
+    }
+    ttsSave();
+    ttsSpeak("Prueba de " + (sub === "rate" ? "velocidad" : "volumen") + ".");
+    return;
+  }
+  print("uso: tts [on|off|voice <n|nombre>|rate <0.5-2>|volume <0-1>|beep on|off]", "warn");
+}
+
 async function cmdSet(args){
   const key = (args[0] || "").toLowerCase();
   if (!key){ print("uso: set <clave> <valor>   (ver 'config' para las claves)", "warn"); return; }
@@ -572,6 +762,16 @@ async function runCommand(raw){
       }
       case "config": await printConfig(); break;
       case "set": await cmdSet(parts.slice(1)); break;
+      case "tts": ttsUnlock(); cmdTts(parts.slice(1)); break;
+      case "test-tts": {
+        ttsUnlock();
+        const text = parts.slice(1).join(" ").trim() ||
+          "Atención. Posición WETH contra USDC en base fuera de rango, un 2,5 por ciento arriba.";
+        const ok = ttsSpeak(text);
+        print(ok ? "♪ hablando…  (ajusta con tts voice · rate · volume · beep)"
+                 : "✗ TTS no disponible o desactivado ('tts on')", ok ? "ok" : "err");
+        break;
+      }
       case "test-telegram": {
         const r = await apiAction({action:"test-telegram"});
         print((r.ok ? "✔ " : "✗ ") + r.message, r.ok ? "ok" : "err"); break;
@@ -621,8 +821,9 @@ consoleEl.addEventListener("click", () => input.focus());
 /* ---------------- arranque ---------------- */
 
 const BOOT = [
-  ["Watchdog VFAT Console v1.1", ""],
+  ["Watchdog VFAT Console v1.2", ""],
   ["perfil de color: " + THEMES[currentTheme()].label + " … ok", "dim"],
+  ["avisos de voz (TTS): " + (TTS.supported ? (TTS.on ? "activados" : "desactivados") : "no soportados en este navegador") + " … ok", "dim"],
   ["abriendo canal con el servidor …", "dim"],
 ];
 
