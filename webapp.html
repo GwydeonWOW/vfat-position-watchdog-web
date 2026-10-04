@@ -300,6 +300,7 @@ const TTS = {
   unlocked: false,   // el navegador requiere interacción antes de sonar
   warned: false,
   audio: null,
+  current: null,     // utterance en curso (evita que el GC la mate: bug de Chrome)
 };
 
 function ttsLoad(){
@@ -327,7 +328,11 @@ function ttsSave(){
 function ttsUnlock(){
   if (TTS.unlocked || !TTS.supported) return;
   TTS.unlocked = true;
-  try{ window.speechSynthesis.speak(new SpeechSynthesisUtterance("")); }catch(e){}
+  try{
+    const warm = new SpeechSynthesisUtterance(" ");
+    warm.volume = 0;
+    window.speechSynthesis.speak(warm);
+  }catch(e){}
 }
 function ttsBeep(){
   try{
@@ -349,6 +354,14 @@ function ttsBeep(){
     }
   }catch(e){}
 }
+const TTS_MSG_ERR = {
+  "not-allowed": "el navegador bloquea el audio (interactúa con la página y reintenta)",
+  "service-not-allowed": "el navegador bloquea el servicio de voz en este origen",
+  "synthesis-failed": "el motor de voz falló (prueba otra voz: 'tts voice')",
+  "audio-busy": "el dispositivo de audio estaba ocupado",
+  "audio-hardware": "fallo de hardware de audio",
+};
+
 function ttsSpeak(text){
   if (!TTS.supported || !TTS.on) return false;
   if (!TTS.unlocked && !TTS.warned){
@@ -357,13 +370,23 @@ function ttsSpeak(text){
   }
   try{
     if (TTS.beep) ttsBeep();
+    const s = window.speechSynthesis;
     const u = new SpeechSynthesisUtterance(text);
     const v = TTS.voices.find((x) => x.name === TTS.voice);
     if (v){ u.voice = v; u.lang = v.lang; }
     u.rate = TTS.rate;
     u.volume = TTS.volume;
-    window.speechSynthesis.cancel();  // el aviso nuevo pisa el pendiente
-    window.speechSynthesis.speak(u);
+    u.onend = () => { if (TTS.current === u) TTS.current = null; };
+    u.onerror = (ev) => {
+      if (TTS.current === u) TTS.current = null;
+      const msg = TTS_MSG_ERR[ev.error];
+      if (msg) print("⚠ TTS: " + msg, "warn");
+    };
+    // referencia viva: si el GC se lleva la utterance a mitad, la voz muere (bug de Chrome)
+    TTS.current = u;
+    if (s.speaking || s.pending) s.cancel();  // el aviso nuevo pisa el pendiente
+    // cancel()+speak() en el mismo tick se pierde en Chrome: rearmar en el siguiente
+    setTimeout(() => { try{ s.resume(); s.speak(u); }catch(e){} }, 60);
     return true;
   }catch(e){ return false; }
 }
@@ -395,6 +418,16 @@ function ttsWatch(st){
 ttsLoad();
 document.addEventListener("keydown", ttsUnlock);
 document.addEventListener("pointerdown", ttsUnlock);
+if (TTS.supported){
+  // keepalive: el motor de Chrome se queda mudo tras un rato; resume() lo descongela
+  setInterval(() => {
+    const s = window.speechSynthesis;
+    if (s.paused || s.speaking || s.pending){ try{ s.resume(); }catch(e){} }
+  }, 5000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden){ try{ window.speechSynthesis.resume(); }catch(e){} }
+  });
+}
 
 /* ---------------- API ---------------- */
 
@@ -658,6 +691,8 @@ function cmdTts(args){
       "velocidad     " + TTS.rate + "    (tts rate 0.5-2)",
       "volumen       " + TTS.volume + "    (tts volume 0-1)",
       "pitido        " + (TTS.beep ? "on" : "off") + "    (tts beep on/off)",
+      "motor         " + (window.speechSynthesis.paused ? "en pausa"
+        : window.speechSynthesis.speaking ? "hablando" : window.speechSynthesis.pending ? "en cola" : "en reposo"),
       "voces         'tts voice' para listar y elegir",
     ];
     print(esc(lines.join("\n")), "");
