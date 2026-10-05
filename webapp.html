@@ -292,6 +292,7 @@ buildSwatches();
 const TTS = {
   supported: "speechSynthesis" in window,
   on: true,          // avisos de voz activados
+  repeat: true,      // reavisa en cada comprobación mientras siga fuera de rango
   voice: "",         // nombre de la voz ("" = predeterminada del navegador)
   rate: 1,           // velocidad 0.5–2
   volume: 1,         // volumen 0–1
@@ -308,7 +309,7 @@ function ttsLoad(){
     const raw = localStorage.getItem("vfat-tts");
     if (raw){
       const saved = JSON.parse(raw);
-      for (const k of ["on","voice","rate","volume","beep"]){
+      for (const k of ["on","repeat","voice","rate","volume","beep"]){
         if (saved[k] !== undefined) TTS[k] = saved[k];
       }
     }
@@ -322,7 +323,7 @@ function ttsLoad(){
 function ttsSave(){
   try{
     localStorage.setItem("vfat-tts", JSON.stringify(
-      {on:TTS.on, voice:TTS.voice, rate:TTS.rate, volume:TTS.volume, beep:TTS.beep}));
+      {on:TTS.on, repeat:TTS.repeat, voice:TTS.voice, rate:TTS.rate, volume:TTS.volume, beep:TTS.beep}));
   }catch(e){}
 }
 function ttsUnlock(){
@@ -393,22 +394,29 @@ function ttsSpeak(text){
 function ttsPair(p){
   return String(p.pair || "").replace("/", " contra ").replace(/[-_]/g, " ");
 }
-/* habla al detectar transiciones: entra/sale de rango (no repite mientras dura) */
+/* habla al detectar transiciones (sale/vuelve) y, con repeat on, reavisa
+   en cada comprobación NUEVA mientras siga fuera de rango. La web sondea el
+   estado cada 3 s: solo se evalúa cuando llega un resultado distinto (r.ts). */
 function ttsWatch(st){
   const r = st && st.last_result;
   if (!r || !TTS.supported) return;
+  if (state.ttsTs === r.ts) return;
+  state.ttsTs = r.ts;
   const seen = state.ttsSeen, fresh = {};
   for (const p of r.positions){
     const key = p.chain + ":" + p.wallet + ":" + p.id;
     const was = seen[key];
     fresh[key] = !!p.in_range;
-    const wentOut = was === undefined ? !p.in_range : (was && !p.in_range);
-    if (wentOut){
-      const dist = (p.distance_pct !== null && p.distance_pct !== undefined)
-        ? ", un " + Number(p.distance_pct).toFixed(1).replace(".", ",") + " por ciento " + (p.side || "")
-        : "";
-      ttsSpeak("Atención. Posición " + ttsPair(p) + " en " + p.chain + " fuera de rango" + dist);
-    } else if (was === false && p.in_range){
+    if (!p.in_range){
+      const wentOut = was === undefined || was;   // primera vez vista o venía en rango
+      if (wentOut || TTS.repeat){
+        const dist = (p.distance_pct !== null && p.distance_pct !== undefined)
+          ? ", un " + Number(p.distance_pct).toFixed(1).replace(".", ",") + " por ciento " + (p.side || "")
+          : "";
+        ttsSpeak("Atención. Posición " + ttsPair(p) + " en " + p.chain +
+          (wentOut ? " fuera de rango" : " sigue fuera de rango") + dist);
+      }
+    } else if (was === false){
       ttsSpeak("Posición " + ttsPair(p) + " de vuelta en rango");
     }
   }
@@ -482,7 +490,7 @@ async function tryLogin(password){
 
 /* ---------------- estado y render ---------------- */
 
-const state = { status:null, lastLogId:0, clockOffset:0, ttsSeen:{} };
+const state = { status:null, lastLogId:0, clockOffset:0, ttsSeen:{}, ttsTs:0 };
 
 function renderPills(st){
   const daemon = $("pill-daemon");
@@ -617,8 +625,8 @@ const HELP = [
   "  test-telegram        enviar un mensaje de prueba a Telegram",
   "  test-tts [texto]     probar la voz de los avisos por sonido",
   "  tts [opción]         voz y sonido al salir una posición de rango:",
-  "                       on · off · voice <n|nombre> · rate <0.5-2> ·",
-  "                       volume <0-1> · beep on/off   ('tts' a secas = estado)",
+  "                       on · off · repeat on/off · voice <n|nombre> ·",
+  "                       rate <0.5-2> · volume <0-1> · beep on/off  ('tts' = estado)",
   "  theme [perfil]       ver o cambiar el perfil de color:",
   "                       verde · ambar · cian · magenta · blanco",
   "  logout               cerrar la sesión (si hay contraseña)",
@@ -691,6 +699,7 @@ function cmdTts(args){
       "velocidad     " + TTS.rate + "    (tts rate 0.5-2)",
       "volumen       " + TTS.volume + "    (tts volume 0-1)",
       "pitido        " + (TTS.beep ? "on" : "off") + "    (tts beep on/off)",
+      "repetición    " + (TTS.repeat ? "on" : "off") + "    (tts repeat on/off · reavisa en cada comprobación)",
       "motor         " + (window.speechSynthesis.paused ? "en pausa"
         : window.speechSynthesis.speaking ? "hablando" : window.speechSynthesis.pending ? "en cola" : "en reposo"),
       "voces         'tts voice' para listar y elegir",
@@ -703,6 +712,14 @@ function cmdTts(args){
     ttsSave();
     print("avisos de voz " + (TTS.on ? "activados" : "desactivados"), "ok");
     if (TTS.on) ttsSpeak("Avisos de voz activados.");
+    return;
+  }
+  if (sub === "repeat"){
+    const b = (args[1] || "").toLowerCase();
+    if (b !== "on" && b !== "off"){ print("uso: tts repeat on|off  (repetir en cada comprobación mientras siga fuera)", "warn"); return; }
+    TTS.repeat = b === "on";
+    ttsSave();
+    print("repetir aviso mientras siga fuera de rango: " + b, "ok");
     return;
   }
   if (sub === "beep"){
@@ -753,7 +770,7 @@ function cmdTts(args){
     ttsSpeak("Prueba de " + (sub === "rate" ? "velocidad" : "volumen") + ".");
     return;
   }
-  print("uso: tts [on|off|voice <n|nombre>|rate <0.5-2>|volume <0-1>|beep on|off]", "warn");
+  print("uso: tts [on|off|repeat on/off|voice <n|nombre>|rate <0.5-2>|volume <0-1>|beep on|off]", "warn");
 }
 
 async function cmdSet(args){
